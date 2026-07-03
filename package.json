@@ -1,0 +1,20 @@
+{
+  "name": "empik-api-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Приложение для работы с Empik Marketplace: автоприём заказов и массовое управление офертами",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "build": "npm run build -w web && npm run build -w server",
+    "start": "npm run start -w server"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "esbuild@0.25.12": true
+  }
+}
