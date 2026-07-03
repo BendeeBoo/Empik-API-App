@@ -39,8 +39,10 @@ export interface EmpikOffer {
   leadtime_to_ship?: number;
 }
 
+// В JSON-запросе OF24 идентификатор оферты называется shop_sku
+// (имя "sku" действует только в файловом импорте OF01)
 export interface OfferUpdate {
-  sku: string;
+  shop_sku: string;
   product_id?: string;
   product_id_type?: string;
   description?: string;

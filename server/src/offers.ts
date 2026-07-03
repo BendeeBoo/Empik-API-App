@@ -38,12 +38,15 @@ export interface BulkChange {
 }
 
 export async function bulkUpdateOffers(changes: BulkChange[]): Promise<number> {
+  // Mirakl требует state_code даже при обновлении — берём его из текущей оферты
+  const { offers } = await getOffers();
+  const stateBySku = new Map(offers.map((o) => [(o.shop_sku ?? o.sku ?? '').trim(), o.state_code]));
   const updates: OfferUpdate[] = changes.map((c) => ({
-    sku: c.sku,
+    shop_sku: c.sku,
     price: c.price,
     quantity: c.quantity,
     leadtime_to_ship: c.leadtime_to_ship,
-    state_code: c.state_code,
+    state_code: c.state_code ?? stateBySku.get(c.sku) ?? '11',
     update_delete: 'update',
   }));
   const importId = await importOffers(updates);
@@ -144,7 +147,7 @@ export function buildImportRows(
 
 export async function sendImportRows(rows: EmpikImportRow[]): Promise<number> {
   const updates: OfferUpdate[] = rows.map((r) => ({
-    sku: r.sku,
+    shop_sku: r.sku,
     product_id: r.productId,
     product_id_type: r.productIdType,
     description: r.description,
