@@ -151,6 +151,17 @@ button.secondary {
   border: 1px solid var(--border);
 }
 
+button.danger {
+  background: var(--card);
+  color: var(--err);
+  border: 1px solid #fecaca;
+}
+
+button.danger:hover:not(:disabled) {
+  background: #fef2f2;
+  filter: none;
+}
+
 input,
 select {
   padding: 8px 10px;

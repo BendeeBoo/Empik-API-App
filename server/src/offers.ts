@@ -37,17 +37,70 @@ export interface BulkChange {
   state_code?: string;
 }
 
-export async function bulkUpdateOffers(changes: BulkChange[]): Promise<number> {
-  // Mirakl требует state_code даже при обновлении — берём его из текущей оферты
+/**
+ * Mirakl при JSON-обновлении СБРАСЫВАЕТ все поля, не переданные в запросе
+ * (описание, срок отправки, логистический класс и т.д.). Поэтому каждое
+ * обновление дополняется текущими значениями оферты из кэша.
+ */
+function fillFromOffer(update: OfferUpdate, offer: EmpikOffer | undefined): OfferUpdate {
+  if (!offer) return { ...update, state_code: update.state_code ?? '11' };
+  const logisticClass =
+    typeof offer.logistic_class === 'object' ? offer.logistic_class?.code : offer.logistic_class;
+  return {
+    ...update,
+    price: update.price ?? offer.price,
+    quantity: update.quantity ?? offer.quantity,
+    leadtime_to_ship: update.leadtime_to_ship ?? offer.leadtime_to_ship,
+    state_code: update.state_code ?? offer.state_code ?? '11',
+    description: update.description ?? offer.description ?? undefined,
+    internal_description: update.internal_description ?? offer.internal_description ?? undefined,
+    logistic_class: update.logistic_class ?? logisticClass ?? undefined,
+    price_additional_info: update.price_additional_info ?? offer.price_additional_info ?? undefined,
+    min_quantity_alert: update.min_quantity_alert ?? offer.min_quantity_alert ?? undefined,
+    available_start_date: update.available_start_date ?? offer.available_start_date ?? undefined,
+    available_end_date: update.available_end_date ?? offer.available_end_date ?? undefined,
+    discount:
+      update.discount ??
+      (offer.discount?.price != null
+        ? {
+            price: offer.discount.price,
+            start_date: offer.discount.start_date,
+            end_date: offer.discount.end_date,
+          }
+        : undefined),
+  };
+}
+
+async function offersBySku(): Promise<Map<string, EmpikOffer>> {
   const { offers } = await getOffers();
-  const stateBySku = new Map(offers.map((o) => [(o.shop_sku ?? o.sku ?? '').trim(), o.state_code]));
-  const updates: OfferUpdate[] = changes.map((c) => ({
-    shop_sku: c.sku,
-    price: c.price,
-    quantity: c.quantity,
-    leadtime_to_ship: c.leadtime_to_ship,
-    state_code: c.state_code ?? stateBySku.get(c.sku) ?? '11',
-    update_delete: 'update',
+  return new Map(offers.map((o) => [(o.shop_sku ?? o.sku ?? '').trim(), o]));
+}
+
+export async function bulkUpdateOffers(changes: BulkChange[]): Promise<number> {
+  const bySku = await offersBySku();
+  const updates: OfferUpdate[] = changes.map((c) =>
+    fillFromOffer(
+      {
+        shop_sku: c.sku,
+        price: c.price,
+        quantity: c.quantity,
+        leadtime_to_ship: c.leadtime_to_ship,
+        state_code: c.state_code,
+        update_delete: 'update',
+      },
+      bySku.get(c.sku),
+    ),
+  );
+  const importId = await importOffers(updates);
+  invalidateOffersCache();
+  return importId;
+}
+
+/** Удаление оферт по SKU (update-delete = delete). */
+export async function bulkDeleteOffers(skus: string[]): Promise<number> {
+  const updates: OfferUpdate[] = skus.map((sku) => ({
+    shop_sku: sku,
+    update_delete: 'delete',
   }));
   const importId = await importOffers(updates);
   invalidateOffersCache();
@@ -146,17 +199,24 @@ export function buildImportRows(
 }
 
 export async function sendImportRows(rows: EmpikImportRow[]): Promise<number> {
-  const updates: OfferUpdate[] = rows.map((r) => ({
-    shop_sku: r.sku,
-    product_id: r.productId,
-    product_id_type: r.productIdType,
-    description: r.description,
-    price: r.price,
-    quantity: r.quantity,
-    state_code: '11',
-    leadtime_to_ship: r.leadtimeDays,
-    update_delete: r.updateDelete,
-  }));
+  const bySku = await offersBySku();
+  const updates: OfferUpdate[] = rows.map((r) =>
+    fillFromOffer(
+      {
+        shop_sku: r.sku,
+        product_id: r.productId,
+        product_id_type: r.productIdType,
+        // при обновлении описание Empik сохраняется (fillFromOffer), задаётся только для новых
+        description: r.updateDelete === 'update' ? undefined : r.description,
+        price: r.price,
+        quantity: r.quantity,
+        state_code: '11',
+        leadtime_to_ship: r.leadtimeDays,
+        update_delete: r.updateDelete,
+      },
+      bySku.get(r.sku),
+    ),
+  );
   const importId = await importOffers(updates);
   invalidateOffersCache();
   return importId;

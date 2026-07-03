@@ -37,19 +37,37 @@ export interface EmpikOffer {
   state_code?: string;
   active?: boolean;
   leadtime_to_ship?: number;
+  description?: string;
+  internal_description?: string;
+  logistic_class?: { code?: string; label?: string } | string;
+  price_additional_info?: string;
+  min_quantity_alert?: number;
+  available_start_date?: string;
+  available_end_date?: string;
+  discount?: { price?: number; start_date?: string; end_date?: string };
+  inactivity_reasons?: { code?: string; label?: string }[];
 }
 
 // В JSON-запросе OF24 идентификатор оферты называется shop_sku
-// (имя "sku" действует только в файловом импорте OF01)
+// (имя "sku" действует только в файловом импорте OF01).
+// ВНИМАНИЕ: Mirakl сбрасывает поля, не переданные в запросе update, —
+// поэтому перед отправкой значения дополняются из текущей оферты (см. offers.ts).
 export interface OfferUpdate {
   shop_sku: string;
   product_id?: string;
   product_id_type?: string;
   description?: string;
+  internal_description?: string;
   price?: number;
   quantity?: number;
   state_code?: string;
   leadtime_to_ship?: number;
+  logistic_class?: string;
+  price_additional_info?: string;
+  min_quantity_alert?: number;
+  available_start_date?: string;
+  available_end_date?: string;
+  discount?: { price?: number; start_date?: string; end_date?: string };
   update_delete?: 'update' | 'delete' | '';
 }
 

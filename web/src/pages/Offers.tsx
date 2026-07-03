@@ -11,6 +11,7 @@ interface Offer {
   state_code?: string;
   active?: boolean;
   leadtime_to_ship?: number;
+  inactivity_reasons?: { code?: string; label?: string }[];
 }
 
 interface ImportStatus {
@@ -19,7 +20,7 @@ interface ImportStatus {
   errorReport?: string;
 }
 
-type PriceMode = 'none' | 'set' | 'percent';
+type PriceMode = 'none' | 'set' | 'percent' | 'amount';
 
 export default function Offers() {
   const [offers, setOffers] = useState<Offer[]>([]);
@@ -90,19 +91,28 @@ export default function Offers() {
   };
 
   const applyBulk = async () => {
+    const priceNum = Number(priceValue.replace(',', '.'));
     const changes = offers
       .filter((o) => selected.has(skuOf(o)))
       .map((o) => {
         const change: Record<string, unknown> = { sku: skuOf(o) };
-        if (priceMode === 'set' && priceValue) change.price = Number(priceValue.replace(',', '.'));
+        if (priceMode === 'set' && priceValue) change.price = priceNum;
         if (priceMode === 'percent' && priceValue && o.price !== undefined) {
-          change.price = Math.round(o.price * (1 + Number(priceValue.replace(',', '.')) / 100) * 100) / 100;
+          change.price = Math.round(o.price * (1 + priceNum / 100) * 100) / 100;
+        }
+        if (priceMode === 'amount' && priceValue && o.price !== undefined) {
+          change.price = Math.round((o.price + priceNum) * 100) / 100;
         }
         if (quantityValue !== '') change.quantity = Number(quantityValue);
         if (leadtimeValue !== '') change.leadtime_to_ship = Number(leadtimeValue);
         return change;
       })
       .filter((c) => Object.keys(c).length > 1);
+    const badPrice = changes.find((c) => typeof c.price === 'number' && c.price <= 0);
+    if (badPrice) {
+      setError(`У оферты ${badPrice.sku} цена после изменения получилась ${badPrice.price} PLN — уменьшите скидку`);
+      return;
+    }
     if (!changes.length) {
       setError('Выберите оферты и укажите хотя бы одно изменение (цена / количество / срок отправки)');
       return;
@@ -120,6 +130,31 @@ export default function Offers() {
       setSelected(new Set());
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Ошибка обновления');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteSelected = async () => {
+    const skus = [...selected];
+    if (!skus.length) return;
+    const ok = window.confirm(
+      `Удалить ${skus.length} оферт с Empik?\n\n${skus.slice(0, 10).join('\n')}${skus.length > 10 ? `\n…и ещё ${skus.length - 10}` : ''}\n\nОтменить это действие будет нельзя — оферты придётся создавать заново.`,
+    );
+    if (!ok) return;
+    setBusy(true);
+    setError('');
+    setMessage('');
+    setImportStatus(null);
+    try {
+      const r = await postJson<{ importId: number }>('/api/offers/bulk-delete', { skus });
+      setMessage(`Удаление ${skus.length} оферт отправлено. Импорт №${r.importId}, ожидаю результат…`);
+      await pollImport(r.importId);
+      setMessage(`Импорт №${r.importId} завершён. Обновляю список оферт…`);
+      await load(true);
+      setSelected(new Set());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка удаления');
     } finally {
       setBusy(false);
     }
@@ -152,12 +187,16 @@ export default function Offers() {
               <option value="none">не менять</option>
               <option value="set">установить (PLN)</option>
               <option value="percent">изменить на %</option>
+              <option value="amount">изменить на сумму (±PLN)</option>
             </select>
           </label>
           {priceMode !== 'none' && (
             <input
               type="text"
-              placeholder={priceMode === 'set' ? 'напр. 1849.00' : 'напр. -5 или 10'}
+              placeholder={
+                priceMode === 'set' ? 'напр. 1849.00' : priceMode === 'percent' ? 'напр. -5 или 10' : 'напр. -50 или 100'
+              }
+              title={priceMode === 'amount' ? 'Сумма прибавляется к текущей цене каждой оферты: -50 понизит все цены на 50 PLN' : undefined}
               value={priceValue}
               onChange={(e) => setPriceValue(e.target.value)}
             />
@@ -184,6 +223,9 @@ export default function Offers() {
           </label>
           <button onClick={applyBulk} disabled={busy || selected.size === 0}>
             {busy ? 'Применяю…' : 'Применить к выбранным'}
+          </button>
+          <button className="danger" onClick={deleteSelected} disabled={busy || selected.size === 0}>
+            Удалить выбранные
           </button>
         </div>
       </div>
@@ -215,7 +257,7 @@ export default function Offers() {
             <th>Цена</th>
             <th>Кол-во</th>
             <th>Срок отправки</th>
-            <th>Активна</th>
+            <th>Статус</th>
           </tr>
         </thead>
         <tbody>
@@ -229,7 +271,18 @@ export default function Offers() {
               <td>{o.price ?? '—'}</td>
               <td>{o.quantity ?? '—'}</td>
               <td>{o.leadtime_to_ship ?? '—'}</td>
-              <td>{o.active === false ? 'нет' : 'да'}</td>
+              <td>
+                {o.active === false ? (
+                  <span
+                    className="badge err"
+                    title={(o.inactivity_reasons ?? []).map((r) => r.label ?? r.code).join('; ') || undefined}
+                  >
+                    Неактивна
+                  </span>
+                ) : (
+                  <span className="badge ok">Активна</span>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>

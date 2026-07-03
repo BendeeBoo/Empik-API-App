@@ -6,6 +6,7 @@ import { loginHandler, requireAuth } from './auth.js';
 import { checkAndAcceptOrders, getPollerState, readOrderLog, startOrderPoller } from './orders.js';
 import {
   buildImportRows,
+  bulkDeleteOffers,
   bulkUpdateOffers,
   createAllegroSession,
   getAllegroSession,
@@ -67,6 +68,19 @@ app.post(
       return;
     }
     const importId = await bulkUpdateOffers(changes);
+    res.json({ importId });
+  }),
+);
+
+app.post(
+  '/api/offers/bulk-delete',
+  wrap(async (req, res) => {
+    const skus = (req.body?.skus ?? []) as string[];
+    if (!Array.isArray(skus) || !skus.length) {
+      res.status(400).json({ error: 'Не переданы SKU для удаления' });
+      return;
+    }
+    const importId = await bulkDeleteOffers(skus);
     res.json({ importId });
   }),
 );
