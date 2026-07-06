@@ -7,7 +7,13 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, init);
+  let res: Response;
+  try {
+    res = await fetch(path, init);
+  } catch {
+    // сеть недоступна — сервер приложения не запущен или перезапускается
+    throw new ApiError(0, 'Нет соединения с сервером приложения. Проверьте, что оно запущено (npm start), и обновите страницу.');
+  }
   const contentType = res.headers.get('content-type') ?? '';
   const body = contentType.includes('json') ? await res.json() : await res.text();
   if (!res.ok) {

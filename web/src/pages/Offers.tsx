@@ -22,11 +22,24 @@ interface ImportStatus {
 
 type PriceMode = 'none' | 'set' | 'percent' | 'amount';
 
+type SortKey = 'sku' | 'title' | 'price' | 'quantity' | 'leadtime' | 'status';
+
+const SORT_COLUMNS: { key: SortKey; label: string }[] = [
+  { key: 'sku', label: 'SKU' },
+  { key: 'title', label: 'Название' },
+  { key: 'price', label: 'Цена' },
+  { key: 'quantity', label: 'Кол-во' },
+  { key: 'leadtime', label: 'Срок отправки' },
+  { key: 'status', label: 'Статус' },
+];
+
 export default function Offers() {
   const [offers, setOffers] = useState<Offer[]>([]);
   const [fetchedAt, setFetchedAt] = useState('');
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('');
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<1 | -1>(1);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -63,11 +76,52 @@ export default function Offers() {
 
   const visible = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    if (!q) return offers;
-    return offers.filter(
-      (o) => skuOf(o).toLowerCase().includes(q) || (o.product_title ?? '').toLowerCase().includes(q),
-    );
-  }, [offers, filter]);
+    let list = q
+      ? offers.filter(
+          (o) => skuOf(o).toLowerCase().includes(q) || (o.product_title ?? '').toLowerCase().includes(q),
+        )
+      : [...offers];
+    if (sortKey) {
+      const value = (o: Offer): string | number | undefined => {
+        switch (sortKey) {
+          case 'sku':
+            return skuOf(o);
+          case 'title':
+            return o.product_title ?? '';
+          case 'price':
+            return o.price;
+          case 'quantity':
+            return o.quantity;
+          case 'leadtime':
+            return o.leadtime_to_ship;
+          case 'status':
+            return o.active === false ? 0 : 1;
+        }
+      };
+      list = list.sort((a, b) => {
+        const va = value(a);
+        const vb = value(b);
+        if (va === undefined && vb === undefined) return 0;
+        if (va === undefined) return 1; // пустые значения всегда внизу
+        if (vb === undefined) return -1;
+        const cmp =
+          typeof va === 'string' || typeof vb === 'string'
+            ? String(va).localeCompare(String(vb), ['pl', 'ru'], { numeric: true, sensitivity: 'base' })
+            : Number(va) - Number(vb);
+        return cmp * sortDir;
+      });
+    }
+    return list;
+  }, [offers, filter, sortKey, sortDir]);
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 1 ? -1 : 1));
+    } else {
+      setSortKey(key);
+      setSortDir(1);
+    }
+  };
 
   const toggleAll = (checked: boolean) => {
     setSelected(checked ? new Set(visible.map(skuOf)) : new Set());
@@ -180,9 +234,9 @@ export default function Offers() {
 
       <div className="card">
         <h3>Массовое редактирование выбранных ({selected.size})</h3>
-        <div className="row wrap">
-          <label>
-            Цена:
+        <div className="bulk-grid">
+          <label className="field">
+            <span>Цена</span>
             <select value={priceMode} onChange={(e) => setPriceMode(e.target.value as PriceMode)}>
               <option value="none">не менять</option>
               <option value="set">установить (PLN)</option>
@@ -190,19 +244,30 @@ export default function Offers() {
               <option value="amount">изменить на сумму (±PLN)</option>
             </select>
           </label>
-          {priceMode !== 'none' && (
+          <label className="field">
+            <span>Значение цены</span>
             <input
               type="text"
+              disabled={priceMode === 'none'}
               placeholder={
-                priceMode === 'set' ? 'напр. 1849.00' : priceMode === 'percent' ? 'напр. -5 или 10' : 'напр. -50 или 100'
+                priceMode === 'none'
+                  ? '—'
+                  : priceMode === 'set'
+                    ? 'напр. 1849.00'
+                    : priceMode === 'percent'
+                      ? 'напр. -5 или 10'
+                      : 'напр. -50 или 100'
               }
               title={priceMode === 'amount' ? 'Сумма прибавляется к текущей цене каждой оферты: -50 понизит все цены на 50 PLN' : undefined}
-              value={priceValue}
+              value={priceMode === 'none' ? '' : priceValue}
               onChange={(e) => setPriceValue(e.target.value)}
             />
-          )}
-          <label>
-            Количество:
+          </label>
+          <button onClick={applyBulk} disabled={busy || selected.size === 0}>
+            {busy ? 'Применяю…' : 'Применить к выбранным'}
+          </button>
+          <label className="field">
+            <span>Количество</span>
             <input
               type="number"
               min="0"
@@ -211,8 +276,8 @@ export default function Offers() {
               onChange={(e) => setQuantityValue(e.target.value)}
             />
           </label>
-          <label>
-            Срок отправки (дней):
+          <label className="field">
+            <span>Срок отправки (дней)</span>
             <input
               type="number"
               min="0"
@@ -221,9 +286,6 @@ export default function Offers() {
               onChange={(e) => setLeadtimeValue(e.target.value)}
             />
           </label>
-          <button onClick={applyBulk} disabled={busy || selected.size === 0}>
-            {busy ? 'Применяю…' : 'Применить к выбранным'}
-          </button>
           <button className="danger" onClick={deleteSelected} disabled={busy || selected.size === 0}>
             Удалить выбранные
           </button>
@@ -252,12 +314,12 @@ export default function Offers() {
                 onChange={(e) => toggleAll(e.target.checked)}
               />
             </th>
-            <th>SKU</th>
-            <th>Название</th>
-            <th>Цена</th>
-            <th>Кол-во</th>
-            <th>Срок отправки</th>
-            <th>Статус</th>
+            {SORT_COLUMNS.map((c) => (
+              <th key={c.key} className="sortable" onClick={() => toggleSort(c.key)} title="Сортировать">
+                {c.label}
+                <span className="sort-arrow">{sortKey === c.key ? (sortDir === 1 ? ' ▲' : ' ▼') : ''}</span>
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
