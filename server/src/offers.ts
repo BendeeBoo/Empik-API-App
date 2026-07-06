@@ -1,7 +1,10 @@
 /**
- * Работа с офертами: кэш списка, массовое обновление, сессии импорта из Allegro.
+ * Работа с офертами: кэш списка, массовое обновление/удаление,
+ * импорт из Allegro со справочником EAN.
  */
-import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { config } from './config.js';
 import {
   getImportErrorReport,
   getImportStatus,
@@ -10,7 +13,14 @@ import {
   type EmpikOffer,
   type OfferUpdate,
 } from './empik.js';
-import { parseAllegroXlsm, type AllegroOffer, type EmpikImportRow } from './allegro.js';
+import {
+  findEanByName,
+  parseAllegroXlsm,
+  parseEanDictionary,
+  type AllegroOffer,
+  type EanEntry,
+  type EmpikImportRow,
+} from './allegro.js';
 
 // ---------- Кэш оферт ----------
 
@@ -25,6 +35,11 @@ export async function getOffers(refresh = false): Promise<{ offers: EmpikOffer[]
 
 export function invalidateOffersCache() {
   cache = null;
+}
+
+async function offersBySku(): Promise<Map<string, EmpikOffer>> {
+  const { offers } = await getOffers();
+  return new Map(offers.map((o) => [(o.shop_sku ?? o.sku ?? '').trim(), o]));
 }
 
 // ---------- Массовое обновление ----------
@@ -71,11 +86,6 @@ function fillFromOffer(update: OfferUpdate, offer: EmpikOffer | undefined): Offe
   };
 }
 
-async function offersBySku(): Promise<Map<string, EmpikOffer>> {
-  const { offers } = await getOffers();
-  return new Map(offers.map((o) => [(o.shop_sku ?? o.sku ?? '').trim(), o]));
-}
-
 export async function bulkUpdateOffers(changes: BulkChange[]): Promise<number> {
   const bySku = await offersBySku();
   const updates: OfferUpdate[] = changes.map((c) =>
@@ -113,111 +123,181 @@ export async function importResult(importId: number) {
   return { ...status, errorReport };
 }
 
+// ---------- Справочник EAN ----------
+
+const EAN_DICT_FILE = () => path.join(config.dataDir, 'ean-dictionary.json');
+
+export function readEanDictionary(): { updatedAt: string | null; entries: EanEntry[] } {
+  try {
+    return JSON.parse(fs.readFileSync(EAN_DICT_FILE(), 'utf8'));
+  } catch {
+    return { updatedAt: null, entries: [] };
+  }
+}
+
+/** Сохранение загруженного справочника EAN (перезаписывает предыдущий). */
+export function saveEanDictionary(buffer: Buffer): { updatedAt: string; entries: EanEntry[] } {
+  const entries = parseEanDictionary(buffer);
+  const data = { updatedAt: new Date().toISOString(), entries };
+  fs.mkdirSync(config.dataDir, { recursive: true });
+  fs.writeFileSync(EAN_DICT_FILE(), JSON.stringify(data, null, 2), 'utf8');
+  return data;
+}
+
 // ---------- Импорт из Allegro ----------
 
-export interface AllegroPreviewRow extends AllegroOffer {
+export interface AllegroVariant {
+  offerId: string;
+  title: string;
+  pricePln?: number;
+  quantity?: number;
+  leadtimeDays?: number;
+}
+
+/** Группа активных оферт Allegro с одним SKU. */
+export interface AllegroGroup {
+  sku: string;
   action: 'new' | 'update' | 'blocked';
+  ean?: string;
+  eanSource?: 'allegro' | 'dictionary';
   reason?: string;
+  variants: AllegroVariant[];
   empikPrice?: number;
   empikQuantity?: number;
+  empikLeadtime?: number;
 }
 
-export interface AllegroSession {
-  id: string;
-  fileName: string;
-  createdAt: string;
-  rows: AllegroPreviewRow[];
-}
+export async function buildAllegroGroups(buffer: Buffer): Promise<{
+  groups: AllegroGroup[];
+  totalRows: number;
+  activeRows: number;
+  dictionaryEntries: number;
+}> {
+  const all = parseAllegroXlsm(buffer);
+  const active = all.filter((o) => o.status === 'Aktywna' && o.sku);
+  const { entries } = readEanDictionary();
+  const empikBySku = await offersBySku();
 
-const sessions = new Map<string, AllegroSession>();
-
-export async function createAllegroSession(fileName: string, buffer: Buffer): Promise<AllegroSession> {
-  const allegroOffers = parseAllegroXlsm(buffer);
-  const { offers: empikOffers } = await getOffers();
-  const empikBySku = new Map(empikOffers.map((o) => [(o.shop_sku ?? o.sku ?? '').trim(), o]));
-
-  const rows: AllegroPreviewRow[] = allegroOffers.map((a) => {
-    const existing = empikBySku.get(a.sku);
-    if (existing) {
-      return {
-        ...a,
-        action: 'update',
-        empikPrice: existing.price,
-        empikQuantity: existing.quantity,
-      };
-    }
-    if (a.ean) {
-      return { ...a, action: 'new' };
-    }
-    return {
-      ...a,
-      action: 'blocked',
-      reason: 'Нет EAN в выгрузке Allegro и нет оферты с таким SKU на Empik — товар нужно завести через панель Empik',
-    };
-  });
-
-  const session: AllegroSession = {
-    id: crypto.randomUUID(),
-    fileName,
-    createdAt: new Date().toISOString(),
-    rows,
-  };
-  sessions.set(session.id, session);
-  // держим не больше 10 сессий в памяти
-  if (sessions.size > 10) {
-    const oldest = [...sessions.keys()][0];
-    sessions.delete(oldest);
+  const bySku = new Map<string, AllegroOffer[]>();
+  for (const o of active) {
+    const list = bySku.get(o.sku) ?? [];
+    list.push(o);
+    bySku.set(o.sku, list);
   }
-  return session;
+
+  const groups: AllegroGroup[] = [];
+  for (const [sku, list] of bySku) {
+    const existing = empikBySku.get(sku);
+    let ean = list.find((o) => o.ean)?.ean;
+    let eanSource: 'allegro' | 'dictionary' | undefined = ean ? 'allegro' : undefined;
+    if (!ean) {
+      ean = findEanByName(sku, entries);
+      if (ean) eanSource = 'dictionary';
+    }
+    groups.push({
+      sku,
+      action: existing ? 'update' : ean ? 'new' : 'blocked',
+      ean,
+      eanSource,
+      reason:
+        existing || ean
+          ? undefined
+          : 'Нет EAN (ни в выгрузке, ни в справочнике) — впишите EAN вручную в таблице или пополните справочник',
+      variants: list.map((o) => ({
+        offerId: o.offerId,
+        title: o.title,
+        pricePln: o.pricePln,
+        quantity: o.quantity,
+        leadtimeDays: o.leadtimeDays,
+      })),
+      empikPrice: existing?.price,
+      empikQuantity: existing?.quantity,
+      empikLeadtime: existing?.leadtime_to_ship,
+    });
+  }
+  return {
+    groups,
+    totalRows: all.length,
+    activeRows: active.length,
+    dictionaryEntries: entries.length,
+  };
 }
 
-export function getAllegroSession(id: string): AllegroSession | undefined {
-  return sessions.get(id);
+// ---------- Отправка выбранных строк ----------
+
+/** Строка, отредактированная пользователем в предпросмотре импорта. */
+export interface ImportRowInput {
+  sku: string;
+  ean?: string;
+  description?: string;
+  price?: number;
+  quantity?: number;
+  leadtimeDays?: number;
 }
 
-/** Применить корректировку цены и собрать строки для отправки/скачивания. */
-export function buildImportRows(
-  session: AllegroSession,
-  opts: { includeNew: boolean; includeUpdates: boolean; priceAdjustPercent: number; skus?: string[] },
-): EmpikImportRow[] {
-  const skuFilter = opts.skus?.length ? new Set(opts.skus) : null;
-  const factor = 1 + (opts.priceAdjustPercent || 0) / 100;
-  return session.rows
-    .filter((r) => r.action !== 'blocked')
-    .filter((r) => (r.action === 'new' ? opts.includeNew : opts.includeUpdates))
-    .filter((r) => !skuFilter || skuFilter.has(r.sku))
-    .map((r) => ({
-      sku: r.sku,
-      productId: r.action === 'new' ? r.ean! : r.sku,
-      productIdType: r.action === 'new' ? 'EAN' : 'SKU',
-      description: r.title,
-      price: r.pricePln !== undefined ? Math.round(r.pricePln * factor * 100) / 100 : undefined,
-      quantity: r.quantity,
-      leadtimeDays: r.leadtimeDays,
-      updateDelete: r.action === 'update' ? 'update' : '',
-    }));
+function validateRows(rows: ImportRowInput[], bySku: Map<string, EmpikOffer>): string[] {
+  const errors: string[] = [];
+  const seen = new Set<string>();
+  for (const r of rows) {
+    if (!r.sku?.trim()) {
+      errors.push('Строка без SKU');
+      continue;
+    }
+    if (seen.has(r.sku)) errors.push(`${r.sku}: SKU повторяется в отправляемых строках`);
+    seen.add(r.sku);
+    if (r.price !== undefined && !(r.price > 0)) errors.push(`${r.sku}: цена должна быть больше нуля`);
+    if (r.quantity !== undefined && r.quantity < 0) errors.push(`${r.sku}: количество не может быть отрицательным`);
+    const isNew = !bySku.has(r.sku);
+    if (isNew) {
+      if (!r.ean || !/^\d{8,14}$/.test(r.ean)) errors.push(`${r.sku}: для создания новой оферты нужен EAN (8–14 цифр)`);
+      if (!r.description?.trim()) errors.push(`${r.sku}: для новой оферты нужно описание`);
+      if (r.price === undefined) errors.push(`${r.sku}: для новой оферты нужна цена`);
+      if (r.quantity === undefined) errors.push(`${r.sku}: для новой оферты нужно количество`);
+    }
+  }
+  return errors;
 }
 
-export async function sendImportRows(rows: EmpikImportRow[]): Promise<number> {
+export async function sendImportRows(rows: ImportRowInput[]): Promise<number> {
   const bySku = await offersBySku();
-  const updates: OfferUpdate[] = rows.map((r) =>
-    fillFromOffer(
+  const errors = validateRows(rows, bySku);
+  if (errors.length) throw new Error(`Проверьте строки: ${errors.join('; ')}`);
+  const updates: OfferUpdate[] = rows.map((r) => {
+    const existing = bySku.get(r.sku);
+    return fillFromOffer(
       {
         shop_sku: r.sku,
-        product_id: r.productId,
-        product_id_type: r.productIdType,
-        // при обновлении описание Empik сохраняется (fillFromOffer), задаётся только для новых
-        description: r.updateDelete === 'update' ? undefined : r.description,
+        product_id: existing ? undefined : r.ean,
+        product_id_type: existing ? undefined : 'EAN',
+        description: existing ? undefined : r.description, // описание Empik при обновлении сохраняется
         price: r.price,
         quantity: r.quantity,
         state_code: '11',
         leadtime_to_ship: r.leadtimeDays,
-        update_delete: r.updateDelete,
+        update_delete: existing ? 'update' : '',
       },
-      bySku.get(r.sku),
-    ),
-  );
+      existing,
+    );
+  });
   const importId = await importOffers(updates);
   invalidateOffersCache();
   return importId;
+}
+
+/** Строки для скачивания xlsx в формате импорта Empik. */
+export async function rowsToXlsxRows(rows: ImportRowInput[]): Promise<EmpikImportRow[]> {
+  const bySku = await offersBySku();
+  return rows.map((r) => {
+    const existing = bySku.get(r.sku);
+    return {
+      sku: r.sku,
+      productId: existing ? r.sku : (r.ean ?? ''),
+      productIdType: existing ? 'SKU' : 'EAN',
+      description: r.description ?? existing?.description ?? '',
+      price: r.price,
+      quantity: r.quantity,
+      leadtimeDays: r.leadtimeDays,
+      updateDelete: existing ? 'update' : '',
+    };
+  });
 }

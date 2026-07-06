@@ -178,6 +178,13 @@ label {
   color: var(--muted);
 }
 
+.field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
 /* Панель массового редактирования: 2 ряда полей, кнопки в правой колонке */
 .bulk-grid {
   display: grid;

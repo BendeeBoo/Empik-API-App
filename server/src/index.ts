@@ -5,15 +5,17 @@ import { config } from './config.js';
 import { loginHandler, requireAuth } from './auth.js';
 import { checkAndAcceptOrders, getPollerState, readOrderLog, startOrderPoller } from './orders.js';
 import {
-  buildImportRows,
+  buildAllegroGroups,
   bulkDeleteOffers,
   bulkUpdateOffers,
-  createAllegroSession,
-  getAllegroSession,
   getOffers,
   importResult,
+  readEanDictionary,
+  rowsToXlsxRows,
+  saveEanDictionary,
   sendImportRows,
   type BulkChange,
+  type ImportRowInput,
 } from './offers.js';
 import { buildEmpikImportXlsx } from './allegro.js';
 
@@ -92,33 +94,38 @@ app.get(
   }),
 );
 
+// ---------- Справочник EAN ----------
+app.get('/api/ean-dictionary', (_req, res) => {
+  const { updatedAt, entries } = readEanDictionary();
+  res.json({ updatedAt, entries: entries.length });
+});
+
+app.post(
+  '/api/ean-dictionary',
+  express.raw({ type: '*/*', limit: '20mb' }),
+  wrap(async (req, res) => {
+    const { updatedAt, entries } = saveEanDictionary(req.body as Buffer);
+    res.json({ updatedAt, entries: entries.length });
+  }),
+);
+
 // ---------- Импорт из Allegro ----------
 app.post(
   '/api/allegro/upload',
   express.raw({ type: '*/*', limit: '100mb' }),
   wrap(async (req, res) => {
     const fileName = String(req.query.filename ?? 'offers.xlsm');
-    const session = await createAllegroSession(fileName, req.body as Buffer);
-    res.json(session);
+    const result = await buildAllegroGroups(req.body as Buffer);
+    res.json({ fileName, ...result });
   }),
 );
 
 app.post(
-  '/api/allegro/:id/send',
+  '/api/allegro/send',
   wrap(async (req, res) => {
-    const session = getAllegroSession(req.params.id);
-    if (!session) {
-      res.status(404).json({ error: 'Сессия импорта не найдена, загрузите файл заново' });
-      return;
-    }
-    const rows = buildImportRows(session, {
-      includeNew: Boolean(req.body?.includeNew),
-      includeUpdates: Boolean(req.body?.includeUpdates),
-      priceAdjustPercent: Number(req.body?.priceAdjustPercent) || 0,
-      skus: req.body?.skus,
-    });
-    if (!rows.length) {
-      res.status(400).json({ error: 'Нет строк для отправки с выбранными настройками' });
+    const rows = (req.body?.rows ?? []) as ImportRowInput[];
+    if (!Array.isArray(rows) || !rows.length) {
+      res.status(400).json({ error: 'Не выбрано ни одной строки для отправки' });
       return;
     }
     const importId = await sendImportRows(rows);
@@ -127,20 +134,14 @@ app.post(
 );
 
 app.post(
-  '/api/allegro/:id/download',
+  '/api/allegro/download',
   wrap(async (req, res) => {
-    const session = getAllegroSession(req.params.id);
-    if (!session) {
-      res.status(404).json({ error: 'Сессия импорта не найдена, загрузите файл заново' });
+    const rows = (req.body?.rows ?? []) as ImportRowInput[];
+    if (!Array.isArray(rows) || !rows.length) {
+      res.status(400).json({ error: 'Не выбрано ни одной строки для скачивания' });
       return;
     }
-    const rows = buildImportRows(session, {
-      includeNew: Boolean(req.body?.includeNew),
-      includeUpdates: Boolean(req.body?.includeUpdates),
-      priceAdjustPercent: Number(req.body?.priceAdjustPercent) || 0,
-      skus: req.body?.skus,
-    });
-    const xlsx = buildEmpikImportXlsx(rows);
+    const xlsx = buildEmpikImportXlsx(await rowsToXlsxRows(rows));
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="empik-offers-import.xlsx"');
     res.send(xlsx);

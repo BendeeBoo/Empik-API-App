@@ -88,6 +88,62 @@ export function parseAllegroXlsm(buffer: Buffer): AllegroOffer[] {
   return offers;
 }
 
+// ---------- Справочник EAN ----------
+
+export interface EanEntry {
+  name: string;
+  ean: string;
+}
+
+/**
+ * Парсер справочника EAN: xlsx, первая колонка — название товара,
+ * вторая — EAN (числа вида «5907184952512.0» нормализуются).
+ */
+export function parseEanDictionary(buffer: Buffer): EanEntry[] {
+  const wb = XLSX.read(buffer, { type: 'buffer' });
+  const rows: unknown[][] = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {
+    header: 1,
+    defval: '',
+    raw: true,
+  });
+  const entries: EanEntry[] = [];
+  for (const row of rows) {
+    const name = String(row[0] ?? '').trim();
+    const ean = String(row[1] ?? '').replace(/\.0+$/, '').replace(/\D/g, '');
+    if (!name || !/^\d{8,14}$/.test(ean)) continue; // заголовок и мусор пропускаются
+    entries.push({ name, ean });
+  }
+  if (!entries.length) {
+    throw new Error('В файле не найдено ни одной строки вида «Название | EAN (8–14 цифр)»');
+  }
+  return entries;
+}
+
+/** Нормализация для сопоставления: регистр, знак ×, лишние пробелы. */
+function normalizeTokens(s: string): string[] {
+  return s
+    .toLowerCase()
+    .replace(/×/g, 'x')
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/**
+ * Поиск EAN по названию: все слова SKU должны входить в название из справочника
+ * (или наоборот). При нескольких кандидатах — совпадение считается неоднозначным.
+ */
+export function findEanByName(sku: string, entries: EanEntry[]): string | undefined {
+  const skuTokens = normalizeTokens(sku);
+  if (!skuTokens.length) return undefined;
+  const matches = entries.filter((e) => {
+    const nameTokens = normalizeTokens(e.name);
+    const nameSet = new Set(nameTokens);
+    const skuSet = new Set(skuTokens);
+    return skuTokens.every((t) => nameSet.has(t)) || nameTokens.every((t) => skuSet.has(t));
+  });
+  return matches.length === 1 ? matches[0].ean : undefined;
+}
+
 /** Колонки шаблона импорта оферт Empik (формат Mirakl OF01). */
 export const EMPIK_IMPORT_HEADERS = [
   'sku', 'product-id', 'product-id-type', 'description', 'internal-description',
